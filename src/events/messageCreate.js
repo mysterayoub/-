@@ -56,29 +56,6 @@ async function getTikTokVideo(url) {
     return { videoBuffer };
 }
  
-// Cache webhooks per channel so we don't create a new one every time
-const webhookCache = new Map();
- 
-async function getOrCreateWebhook(channel) {
-    if (webhookCache.has(channel.id)) {
-        return webhookCache.get(channel.id);
-    }
- 
-    // Check if there's already a webhook made by this bot
-    const webhooks = await channel.fetchWebhooks();
-    let webhook = webhooks.find(w => w.owner?.id === channel.client.user.id);
- 
-    if (!webhook) {
-        webhook = await channel.createWebhook({
-            name: 'TikTok',
-            reason: 'TikTok video downloader',
-        });
-    }
- 
-    webhookCache.set(channel.id, webhook);
-    return webhook;
-}
- 
 async function handleTikTok(message) {
     try {
         const matches = message.content.match(TIKTOK_REGEX);
@@ -86,7 +63,6 @@ async function handleTikTok(message) {
  
         await message.channel.sendTyping();
  
-        // Keep any text the user wrote besides the link
         const textWithoutLinks = message.content.replace(TIKTOK_REGEX, '').trim();
  
         try {
@@ -96,16 +72,22 @@ async function handleTikTok(message) {
             // Delete the original message
             await message.delete().catch(() => {});
  
-            // Get or create webhook for this channel
-            const webhook = await getOrCreateWebhook(message.channel);
+            // Create a fresh webhook
+            const webhook = await message.channel.createWebhook({
+                name: message.member?.displayName || message.author.username,
+                reason: 'TikTok video downloader',
+            });
  
-            // Send as the user using their name and avatar
+            // Send as the user
             await webhook.send({
                 username: message.member?.displayName || message.author.username,
                 avatarURL: message.author.displayAvatarURL({ dynamic: true }),
                 content: textWithoutLinks || null,
                 files: [attachment],
             });
+ 
+            // Delete the webhook immediately after sending
+            await webhook.delete('TikTok webhook cleanup').catch(() => {});
  
         } catch (err) {
             if (err.message === 'VIDEO_TOO_LONG') {
@@ -254,3 +236,4 @@ async function handleLeveling(message, client) {
         logger.error('Error handling leveling for message:', error);
     }
 }
+ 
