@@ -74,8 +74,8 @@ export async function createInitialHelpMenu(client) {
 
     const botName = client?.user?.username || "Bot";
     const embed = createEmbed({ 
-        title: `🤖 ${botName} Help Center`,
-        description: "Your all-in-one Discord companion for moderation, economy, fun, and server management.",
+        title: `🤖 ${botName} Overview Center`,
+        description: "ig this is a one in all bot for for moderation, economy, fun, and server management.",
         color: 'primary'
     });
 
@@ -162,10 +162,6 @@ export async function createInitialHelpMenu(client) {
     });
     embed.setTimestamp();
 
-    const bugReportButton = new ButtonBuilder()
-        .setCustomId(BUG_REPORT_BUTTON_ID)
-        .setLabel("Report Bug")
-        .setStyle(ButtonStyle.Danger);
 
     const supportButton = new ButtonBuilder()
         .setLabel("Support Server")
