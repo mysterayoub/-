@@ -158,7 +158,7 @@ export async function createInitialHelpMenu(client) {
     );
 
     embed.setFooter({ 
-        text: "Made with ❤️" 
+        text: "Made by 《 𝐌𝐘𝐒𝐓𝐄𝐑 | 𝐀𝐘𝐎𝐔𝐁 ᯓ★》" 
     });
     embed.setTimestamp();
 
@@ -169,12 +169,12 @@ export async function createInitialHelpMenu(client) {
 
     const supportButton = new ButtonBuilder()
         .setLabel("Support Server")
-        .setURL("https://discord.gg/QnWNz2dKCE")
+        .setURL("https://discord.gg/rAjBpsZzBV")
         .setStyle(ButtonStyle.Link);
 
     const touchpointButton = new ButtonBuilder()
-        .setLabel("Learn from Touchpoint")
-        .setURL("https://www.youtube.com/@TouchDisc")
+        .setLabel("Follow me on TikTok")
+        .setURL("https://www.tiktok.com/@myster..a?_r=1&_t=ZG-95tRHkTx6Ce")
         .setStyle(ButtonStyle.Link);
 
     const selectRow = createSelectMenu(
