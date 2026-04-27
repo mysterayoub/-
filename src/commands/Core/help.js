@@ -158,7 +158,7 @@ export async function createInitialHelpMenu(client) {
     );
 
     embed.setFooter({ 
-        text: "Made by 《 𝐌𝐘𝐒𝐓𝐄𝐑 | 𝐀𝐘𝐎𝐔𝐁 ᯓ★》" 
+        text: "Made by《 𝐌𝐘𝐒𝐓𝐄𝐑 | 𝐀𝐘𝐎𝐔𝐁 ᯓ★》" 
     });
     embed.setTimestamp();
 
