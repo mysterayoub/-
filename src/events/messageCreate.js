@@ -39,7 +39,6 @@ async function fetchBuffer(url, redirects = 5) {
 }
  
 async function getTikTokVideo(url) {
-    // Use tikwm API — reliable, no key needed
     const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`;
     const { buffer } = await fetchBuffer(apiUrl);
     const json = JSON.parse(buffer.toString());
@@ -48,24 +47,13 @@ async function getTikTokVideo(url) {
         throw new Error('Could not extract TikTok video');
     }
  
-    const videoUrl = json.data.play;
-    const author = json.data.author?.nickname || 'Unknown';
-    const desc = json.data.title || '';
     const duration = json.data.duration || 0;
+    if (duration > 180) throw new Error('VIDEO_TOO_LONG');
  
-    // Don't attempt videos longer than 3 minutes (likely too large for Discord)
-    if (duration > 180) {
-        throw new Error('VIDEO_TOO_LONG');
-    }
+    const { buffer: videoBuffer } = await fetchBuffer(json.data.play);
+    if (videoBuffer.byteLength > 24 * 1024 * 1024) throw new Error('VIDEO_TOO_LARGE');
  
-    const { buffer: videoBuffer } = await fetchBuffer(videoUrl);
- 
-    // Discord bots have a 25MB upload limit
-    if (videoBuffer.byteLength > 24 * 1024 * 1024) {
-        throw new Error('VIDEO_TOO_LARGE');
-    }
- 
-    return { videoBuffer, author, desc };
+    return { videoBuffer };
 }
  
 async function handleTikTok(message) {
@@ -73,28 +61,26 @@ async function handleTikTok(message) {
         const matches = message.content.match(TIKTOK_REGEX);
         if (!matches) return;
  
+        // Suppress the embed on the original message
+        await message.edit({ flags: [4096] }).catch(() => {});
+ 
         for (const url of matches) {
-            // Show typing indicator
             await message.channel.sendTyping();
  
             try {
-                const { videoBuffer, author, desc } = await getTikTokVideo(url);
- 
+                const { videoBuffer } = await getTikTokVideo(url);
                 const attachment = new AttachmentBuilder(videoBuffer, { name: 'tiktok.mp4' });
  
-                await message.channel.send({
-                    content: `📱 **${author}**${desc ? ` — ${desc.slice(0, 100)}` : ''}`,
-                    files: [attachment],
-                });
+                // Send just the video file, no text
+                await message.channel.send({ files: [attachment] });
  
             } catch (err) {
                 if (err.message === 'VIDEO_TOO_LONG') {
-                    await message.channel.send(`⚠️ That TikTok is too long to upload here (max 3 minutes).`);
+                    await message.channel.send({ content: `⚠️ That TikTok is too long to upload (max 3 minutes).` });
                 } else if (err.message === 'VIDEO_TOO_LARGE') {
-                    await message.channel.send(`⚠️ That TikTok video is too large to upload (max 25MB).`);
+                    await message.channel.send({ content: `⚠️ That TikTok is too large to upload (max 25MB).` });
                 } else {
                     logger.warn(`TikTok download failed for ${url}:`, err.message);
-                    // Silently fail — don't spam the channel on API errors
                 }
             }
         }
@@ -175,11 +161,9 @@ export default {
         try {
             if (message.author.bot || !message.guild) return;
  
-            // Automod — stop processing if message was blocked
             const blocked = await handleAutomod(message);
             if (blocked) return;
  
-            // TikTok downloader — runs in background, doesn't block leveling
             handleTikTok(message).catch(err => logger.error('TikTok handler error:', err));
  
             await handleLeveling(message, client);
@@ -238,3 +222,4 @@ async function handleLeveling(message, client) {
         logger.error('Error handling leveling for message:', error);
     }
 }
+ 
