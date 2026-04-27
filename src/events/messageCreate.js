@@ -56,32 +56,64 @@ async function getTikTokVideo(url) {
     return { videoBuffer };
 }
  
+// Cache webhooks per channel so we don't create a new one every time
+const webhookCache = new Map();
+ 
+async function getOrCreateWebhook(channel) {
+    if (webhookCache.has(channel.id)) {
+        return webhookCache.get(channel.id);
+    }
+ 
+    // Check if there's already a webhook made by this bot
+    const webhooks = await channel.fetchWebhooks();
+    let webhook = webhooks.find(w => w.owner?.id === channel.client.user.id);
+ 
+    if (!webhook) {
+        webhook = await channel.createWebhook({
+            name: 'TikTok',
+            reason: 'TikTok video downloader',
+        });
+    }
+ 
+    webhookCache.set(channel.id, webhook);
+    return webhook;
+}
+ 
 async function handleTikTok(message) {
     try {
         const matches = message.content.match(TIKTOK_REGEX);
         if (!matches) return;
  
-        // Suppress the embed on the original message
-        await message.edit({ flags: [4096] }).catch(() => {});
+        await message.channel.sendTyping();
  
-        for (const url of matches) {
-            await message.channel.sendTyping();
+        // Keep any text the user wrote besides the link
+        const textWithoutLinks = message.content.replace(TIKTOK_REGEX, '').trim();
  
-            try {
-                const { videoBuffer } = await getTikTokVideo(url);
-                const attachment = new AttachmentBuilder(videoBuffer, { name: 'tiktok.mp4' });
+        try {
+            const { videoBuffer } = await getTikTokVideo(matches[0]);
+            const attachment = new AttachmentBuilder(videoBuffer, { name: 'tiktok.mp4' });
  
-                // Send just the video file, no text
-                await message.channel.send({ files: [attachment] });
+            // Delete the original message
+            await message.delete().catch(() => {});
  
-            } catch (err) {
-                if (err.message === 'VIDEO_TOO_LONG') {
-                    await message.channel.send({ content: `⚠️ That TikTok is too long to upload (max 3 minutes).` });
-                } else if (err.message === 'VIDEO_TOO_LARGE') {
-                    await message.channel.send({ content: `⚠️ That TikTok is too large to upload (max 25MB).` });
-                } else {
-                    logger.warn(`TikTok download failed for ${url}:`, err.message);
-                }
+            // Get or create webhook for this channel
+            const webhook = await getOrCreateWebhook(message.channel);
+ 
+            // Send as the user using their name and avatar
+            await webhook.send({
+                username: message.member?.displayName || message.author.username,
+                avatarURL: message.author.displayAvatarURL({ dynamic: true }),
+                content: textWithoutLinks || null,
+                files: [attachment],
+            });
+ 
+        } catch (err) {
+            if (err.message === 'VIDEO_TOO_LONG') {
+                await message.channel.send({ content: `⚠️ That TikTok is too long to upload (max 3 minutes).` });
+            } else if (err.message === 'VIDEO_TOO_LARGE') {
+                await message.channel.send({ content: `⚠️ That TikTok is too large to upload (max 25MB).` });
+            } else {
+                logger.warn(`TikTok download failed for ${matches[0]}:`, err.message);
             }
         }
     } catch (error) {
@@ -222,4 +254,3 @@ async function handleLeveling(message, client) {
         logger.error('Error handling leveling for message:', error);
     }
 }
- 
