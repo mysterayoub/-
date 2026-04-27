@@ -1,63 +1,132 @@
-import { Events } from 'discord.js';
+import { Events, AttachmentBuilder } from 'discord.js';
 import { logger } from '../utils/logger.js';
 import { getLevelingConfig, getUserLevelData } from '../services/leveling.js';
 import { addXp } from '../services/xpSystem.js';
 import { checkRateLimit } from '../utils/rateLimiter.js';
+import https from 'https';
+import http from 'http';
+import { URL } from 'url';
  
 const MESSAGE_XP_RATE_LIMIT_ATTEMPTS = 12;
 const MESSAGE_XP_RATE_LIMIT_WINDOW_MS = 10000;
  
+// ── TikTok Downloader ────────────────────────────────────────────────────────
+ 
+const TIKTOK_REGEX = /https?:\/\/(www\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/gi;
+ 
+async function fetchBuffer(url, redirects = 5) {
+    return new Promise((resolve, reject) => {
+        if (redirects === 0) return reject(new Error('Too many redirects'));
+        const parsed = new URL(url);
+        const lib = parsed.protocol === 'https:' ? https : http;
+        const req = lib.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            }
+        }, (res) => {
+            if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+                return resolve(fetchBuffer(res.headers.location, redirects - 1));
+            }
+            if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve({ buffer: Buffer.concat(chunks), contentType: res.headers['content-type'] }));
+            res.on('error', reject);
+        });
+        req.on('error', reject);
+        req.setTimeout(15000, () => { req.destroy(); reject(new Error('Request timed out')); });
+    });
+}
+ 
+async function getTikTokVideo(url) {
+    // Use tikwm API — reliable, no key needed
+    const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`;
+    const { buffer } = await fetchBuffer(apiUrl);
+    const json = JSON.parse(buffer.toString());
+ 
+    if (!json || json.code !== 0 || !json.data?.play) {
+        throw new Error('Could not extract TikTok video');
+    }
+ 
+    const videoUrl = json.data.play;
+    const author = json.data.author?.nickname || 'Unknown';
+    const desc = json.data.title || '';
+    const duration = json.data.duration || 0;
+ 
+    // Don't attempt videos longer than 3 minutes (likely too large for Discord)
+    if (duration > 180) {
+        throw new Error('VIDEO_TOO_LONG');
+    }
+ 
+    const { buffer: videoBuffer } = await fetchBuffer(videoUrl);
+ 
+    // Discord bots have a 25MB upload limit
+    if (videoBuffer.byteLength > 24 * 1024 * 1024) {
+        throw new Error('VIDEO_TOO_LARGE');
+    }
+ 
+    return { videoBuffer, author, desc };
+}
+ 
+async function handleTikTok(message) {
+    try {
+        const matches = message.content.match(TIKTOK_REGEX);
+        if (!matches) return;
+ 
+        for (const url of matches) {
+            // Show typing indicator
+            await message.channel.sendTyping();
+ 
+            try {
+                const { videoBuffer, author, desc } = await getTikTokVideo(url);
+ 
+                const attachment = new AttachmentBuilder(videoBuffer, { name: 'tiktok.mp4' });
+ 
+                await message.channel.send({
+                    content: `📱 **${author}**${desc ? ` — ${desc.slice(0, 100)}` : ''}`,
+                    files: [attachment],
+                });
+ 
+            } catch (err) {
+                if (err.message === 'VIDEO_TOO_LONG') {
+                    await message.channel.send(`⚠️ That TikTok is too long to upload here (max 3 minutes).`);
+                } else if (err.message === 'VIDEO_TOO_LARGE') {
+                    await message.channel.send(`⚠️ That TikTok video is too large to upload (max 25MB).`);
+                } else {
+                    logger.warn(`TikTok download failed for ${url}:`, err.message);
+                    // Silently fail — don't spam the channel on API errors
+                }
+            }
+        }
+    } catch (error) {
+        logger.error('Error in TikTok handler:', error);
+    }
+}
+ 
 // ── Automod ──────────────────────────────────────────────────────────────────
  
-// Normalise the message before checking — strips zero-width chars, repeated
-// punctuation used as spacers, and lowercases everything.
 function normalise(str) {
     return str
         .toLowerCase()
-        // Remove zero-width / invisible unicode characters
         .replace(/[\u200B-\u200D\uFEFF\u00AD\u034F\u2060\u180E]/g, '')
-        // Remove common spacer characters people put between letters
         .replace(/[\s\-_.*,|\\\/'"`;:~^]+/g, '')
-        // Collapse repeated special chars
         .replace(/[^a-z0-9]/g, c => c);
 }
  
-// Each pattern is tested against the normalised string.
-// We block "nigger" and all its variants but NOT "nigga" or "niggas".
 const BLOCKED_PATTERNS = [
-    // Core word and leet-speak substitutions
-    // n + i variants + gg variants + e variants + r variants
     /n[i!1|ï¡ì í î ïɪ]+[g9q6][g9q6][e3€3ëèéê]+[r|]/,
- 
-    // Shortened: "nger", "ng3r", "n9er", etc. (missing the i)
     /n[g9][g9]?[e3€]+[r|]/,
- 
-    // "ngr" (fully stripped vowels)
     /n[g9][g9]?[r|]/,
- 
-    // "nigg" without the "er" ending (people just posting the slur cut short)
     /n[i!1|ï]+[g9q6][g9q6]/,
- 
-    // "n-word" written literally
     /n[\-–—]+w[o0]rd/,
- 
-    // Asterisk/symbol masks like n***er, n**ger, n*gger
     /n[\*#@!?]{1,4}[e3]?[r|]?/,
- 
-    // Spaced out: n i g g e r
     /n\s+[i!1]\s+[g9]\s+[g9]\s+[e3]\s+[r|]/,
- 
-    // Hard r written as separate word after "nigga": "nigga r"
     /nigg[a@4][^\w]?[r|]/,
 ];
  
 function isBlocked(content) {
     const norm = normalise(content);
- 
-    // Whitelist: pure "nigga" or "niggas" — do not block these
-    // We strip them out before checking so they don't accidentally match
     const withoutAllowed = norm.replace(/nigga[sz]?/g, '');
- 
     return BLOCKED_PATTERNS.some(p => p.test(withoutAllowed));
 }
  
@@ -65,25 +134,19 @@ async function handleAutomod(message) {
     try {
         if (!message.content) return false;
  
-        // Check if user has the "Automod bypass" role
         const bypassRole = message.guild.roles.cache.find(r => r.name === 'Automod bypass');
         if (bypassRole && message.member.roles.cache.has(bypassRole.id)) return false;
  
         if (!isBlocked(message.content)) return false;
  
-        // Delete the offending message
         await message.delete().catch(() => {});
  
-        // Find staff-chat channel
-        const staffChannel = message.guild.channels.cache.find(
-            c => c.name === '✨・staff-chat'
-        );
+        const staffChannel = message.guild.channels.cache.find(c => c.name === '✨・staff-chat');
         if (!staffChannel) {
             logger.warn('Automod: Could not find ✨・staff-chat channel');
             return true;
         }
  
-        // Find Staff role
         const staffRole = message.guild.roles.cache.find(r => r.name === 'Staff');
         const staffMention = staffRole ? staffRole.toString() : '@Staff';
  
@@ -103,6 +166,7 @@ async function handleAutomod(message) {
         return false;
     }
 }
+ 
 // ────────────────────────────────────────────────────────────────────────────
  
 export default {
@@ -111,8 +175,12 @@ export default {
         try {
             if (message.author.bot || !message.guild) return;
  
+            // Automod — stop processing if message was blocked
             const blocked = await handleAutomod(message);
             if (blocked) return;
+ 
+            // TikTok downloader — runs in background, doesn't block leveling
+            handleTikTok(message).catch(err => logger.error('TikTok handler error:', err));
  
             await handleLeveling(message, client);
         } catch (error) {
@@ -120,6 +188,8 @@ export default {
         }
     }
 };
+ 
+// ── Leveling (unchanged) ─────────────────────────────────────────────────────
  
 async function handleLeveling(message, client) {
     try {
