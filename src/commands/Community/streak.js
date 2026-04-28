@@ -38,22 +38,22 @@ export default {
             const freezeData = await getFreezesData(client, guildId, userId);
  
             if (!streak || streak.streak_count === 0) {
+                const chatChannel = interaction.guild.channels.cache.find(c => c.name === '✨・chat-general');
                 return InteractionHelper.universalReply(interaction, {
-                    content: `🔥 You have no active streak with ${target.toString()} yet. Reply to or mention them in <#${interaction.guild.channels.cache.find(c => c.name === '✨・chat-general')?.id}> to start one!`,
+                    content: `🔥 You have no active streak with ${target.toString()} yet. Reply to or mention them in ${chatChannel ? chatChannel.toString() : '#✨・chat-general'} to start one!`,
                     ephemeral: true,
                 });
             }
  
             // Time left until midnight Amsterdam
             const now = new Date();
-            const midnight = new Date();
-            midnight.setTimeZone?.('Europe/Amsterdam');
+            const midnight = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
             midnight.setHours(24, 0, 0, 0);
-            const msLeft = midnight - now;
+            const msLeft = midnight - new Date(now.toLocaleString('en-US', { timeZone: 'Europe/Amsterdam' }));
             const hoursLeft = Math.floor(msLeft / 3600000);
             const minsLeft = Math.floor((msLeft % 3600000) / 60000);
  
-            const [u1, u2] = [userId, target.id].sort();
+            const [u1] = [userId, target.id].sort();
             const userInteracted = userId === u1 ? streak.user1_interacted_today : streak.user2_interacted_today;
             const targetInteracted = target.id === u1 ? streak.user1_interacted_today : streak.user2_interacted_today;
  
