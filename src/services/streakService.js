@@ -1,182 +1,200 @@
 // src/services/streakService.js
-// Handles all database operations for the streak system
+import { logger } from '../utils/logger.js';
  
-export async function ensureStreakTables(client) {
-    await client.db.query(`
-        CREATE TABLE IF NOT EXISTS streaks (
-            id SERIAL PRIMARY KEY,
-            guild_id TEXT NOT NULL,
-            user1_id TEXT NOT NULL,
-            user2_id TEXT NOT NULL,
-            streak_count INTEGER DEFAULT 1,
-            highest_streak INTEGER DEFAULT 1,
-            last_interaction BIGINT NOT NULL,
-            user1_interacted_today BOOLEAN DEFAULT FALSE,
-            user2_interacted_today BOOLEAN DEFAULT FALSE,
-            freeze_pending BOOLEAN DEFAULT FALSE,
-            freeze_pending_until BIGINT,
-            created_at BIGINT NOT NULL,
-            UNIQUE(guild_id, user1_id, user2_id)
-        );
+// Key helpers
+const streakKey = (guildId, u1, u2) => {
+    const [a, b] = [u1, u2].sort();
+    return `streaks:${guildId}:${a}:${b}`;
+};
+const freezeKey = (guildId, userId) => `streak-freezes:${guildId}:${userId}`;
+const cooldownKey = (guildId, u1, u2) => {
+    const [a, b] = [u1, u2].sort();
+    return `streak-cooldown:${guildId}:${a}:${b}`;
+};
+const userIndexKey = (guildId, userId) => `streak-index:${guildId}:${userId}`;
+const guildIndexKey = (guildId) => `streak-guild-index:${guildId}`;
  
-        CREATE TABLE IF NOT EXISTS streak_freezes (
-            user_id TEXT NOT NULL,
-            guild_id TEXT NOT NULL,
-            freezes_available INTEGER DEFAULT 3,
-            last_reset BIGINT NOT NULL,
-            PRIMARY KEY (user_id, guild_id)
-        );
+// ── Streak CRUD ───────────────────────────────────────────────────────────────
  
-        CREATE TABLE IF NOT EXISTS streak_interactions (
-            id SERIAL PRIMARY KEY,
-            guild_id TEXT NOT NULL,
-            user_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            timestamp BIGINT NOT NULL
-        );
- 
-        CREATE TABLE IF NOT EXISTS breakstreak_requests (
-            id SERIAL PRIMARY KEY,
-            guild_id TEXT NOT NULL,
-            streak_id INTEGER NOT NULL,
-            requester_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            message_id TEXT,
-            created_at BIGINT NOT NULL
-        );
-    `).catch(() => {}); // Tables may already exist
-}
- 
-// Get streak between two users (order-independent)
 export async function getStreak(client, guildId, userId1, userId2) {
     const [u1, u2] = [userId1, userId2].sort();
-    const result = await client.db.query(
-        `SELECT * FROM streaks WHERE guild_id = $1 AND user1_id = $2 AND user2_id = $3`,
-        [guildId, u1, u2]
-    );
-    return result.rows[0] || null;
+    return await client.db.get(streakKey(guildId, u1, u2)) || null;
 }
  
-// Create a new streak between two users
 export async function createStreak(client, guildId, userId1, userId2) {
     const [u1, u2] = [userId1, userId2].sort();
+    const key = streakKey(guildId, u1, u2);
     const now = Date.now();
-    const result = await client.db.query(
-        `INSERT INTO streaks (guild_id, user1_id, user2_id, streak_count, highest_streak, last_interaction, user1_interacted_today, user2_interacted_today, created_at)
-         VALUES ($1, $2, $3, 1, 1, $4, FALSE, FALSE, $4)
-         ON CONFLICT (guild_id, user1_id, user2_id) DO NOTHING
-         RETURNING *`,
-        [guildId, u1, u2, now]
-    );
-    return result.rows[0] || null;
+ 
+    const existing = await client.db.get(key);
+    if (existing) return existing;
+ 
+    const streak = {
+        guildId,
+        user1_id: u1,
+        user2_id: u2,
+        streak_count: 1,
+        highest_streak: 1,
+        user1_interacted_today: false,
+        user2_interacted_today: false,
+        freeze_pending: false,
+        freeze_pending_until: null,
+        created_at: now,
+        last_interaction: now,
+    };
+ 
+    await client.db.set(key, streak);
+ 
+    // Add to user indexes
+    await addToUserIndex(client, guildId, u1, key);
+    await addToUserIndex(client, guildId, u2, key);
+    await addToGuildIndex(client, guildId, key);
+ 
+    return streak;
 }
  
-// Update streak after valid interaction
-export async function updateStreakInteraction(client, guildId, userId1, userId2, actorId) {
+export async function saveStreak(client, guildId, userId1, userId2, data) {
     const [u1, u2] = [userId1, userId2].sort();
-    const field = actorId === u1 ? 'user1_interacted_today' : 'user2_interacted_today';
-    await client.db.query(
-        `UPDATE streaks SET ${field} = TRUE, last_interaction = $1 WHERE guild_id = $2 AND user1_id = $3 AND user2_id = $4`,
-        [Date.now(), guildId, u1, u2]
-    );
+    await client.db.set(streakKey(guildId, u1, u2), data);
 }
  
-// Increment streak count
-export async function incrementStreak(client, guildId, userId1, userId2) {
-    const [u1, u2] = [userId1, userId2].sort();
-    await client.db.query(
-        `UPDATE streaks
-         SET streak_count = streak_count + 1,
-             highest_streak = GREATEST(highest_streak, streak_count + 1),
-             user1_interacted_today = FALSE,
-             user2_interacted_today = FALSE
-         WHERE guild_id = $1 AND user1_id = $2 AND user2_id = $3`,
-        [guildId, u1, u2]
-    );
-}
- 
-// Reset streak to 0 (broken)
-export async function breakStreak(client, guildId, userId1, userId2) {
-    const [u1, u2] = [userId1, userId2].sort();
-    await client.db.query(
-        `UPDATE streaks SET streak_count = 0, user1_interacted_today = FALSE, user2_interacted_today = FALSE WHERE guild_id = $1 AND user1_id = $2 AND user2_id = $3`,
-        [guildId, u1, u2]
-    );
-}
- 
-// Delete streak entirely (from /breakstreak command)
 export async function deleteStreak(client, guildId, userId1, userId2) {
     const [u1, u2] = [userId1, userId2].sort();
-    await client.db.query(
-        `DELETE FROM streaks WHERE guild_id = $1 AND user1_id = $2 AND user2_id = $3`,
-        [guildId, u1, u2]
-    );
+    const key = streakKey(guildId, u1, u2);
+    await client.db.delete(key);
+    await removeFromUserIndex(client, guildId, u1, key);
+    await removeFromUserIndex(client, guildId, u2, key);
+    await removeFromGuildIndex(client, guildId, key);
 }
  
-// Get all active streaks for a user
+export async function updateStreakInteraction(client, guildId, userId1, userId2, actorId) {
+    const streak = await getStreak(client, guildId, userId1, userId2);
+    if (!streak) return;
+ 
+    const [u1] = [userId1, userId2].sort();
+    if (actorId === u1) {
+        streak.user1_interacted_today = true;
+    } else {
+        streak.user2_interacted_today = true;
+    }
+    streak.last_interaction = Date.now();
+ 
+    await saveStreak(client, guildId, userId1, userId2, streak);
+}
+ 
+export async function incrementStreak(client, guildId, userId1, userId2) {
+    const streak = await getStreak(client, guildId, userId1, userId2);
+    if (!streak) return;
+ 
+    streak.streak_count += 1;
+    streak.highest_streak = Math.max(streak.highest_streak, streak.streak_count);
+    streak.user1_interacted_today = false;
+    streak.user2_interacted_today = false;
+ 
+    await saveStreak(client, guildId, userId1, userId2, streak);
+    return streak;
+}
+ 
+export async function breakStreak(client, guildId, userId1, userId2) {
+    const streak = await getStreak(client, guildId, userId1, userId2);
+    if (!streak) return;
+ 
+    streak.streak_count = 0;
+    streak.user1_interacted_today = false;
+    streak.user2_interacted_today = false;
+    streak.freeze_pending = true;
+    streak.freeze_pending_until = Date.now() + 86400000; // 24h
+ 
+    await saveStreak(client, guildId, userId1, userId2, streak);
+    return streak;
+}
+ 
 export async function getUserStreaks(client, guildId, userId) {
-    const result = await client.db.query(
-        `SELECT * FROM streaks WHERE guild_id = $1 AND (user1_id = $2 OR user2_id = $2) AND streak_count > 0 ORDER BY streak_count DESC`,
-        [guildId, userId]
-    );
-    return result.rows;
+    const index = await client.db.get(userIndexKey(guildId, userId)) || [];
+    const streaks = [];
+ 
+    for (const key of index) {
+        const s = await client.db.get(key);
+        if (s && s.streak_count > 0) streaks.push(s);
+    }
+ 
+    return streaks.sort((a, b) => b.streak_count - a.streak_count);
 }
  
-// Count active streaks for a user
 export async function countUserStreaks(client, guildId, userId) {
-    const result = await client.db.query(
-        `SELECT COUNT(*) FROM streaks WHERE guild_id = $1 AND (user1_id = $2 OR user2_id = $2) AND streak_count > 0`,
-        [guildId, userId]
-    );
-    return parseInt(result.rows[0].count);
+    const streaks = await getUserStreaks(client, guildId, userId);
+    return streaks.length;
 }
  
-// Get top streaks in server
-export async function getTopStreaks(client, guildId, limit = 10) {
-    const result = await client.db.query(
-        `SELECT * FROM streaks WHERE guild_id = $1 AND streak_count > 0 ORDER BY streak_count DESC LIMIT $2`,
-        [guildId, limit]
-    );
-    return result.rows;
-}
- 
-// Get all streaks due for midnight check
 export async function getAllActiveStreaks(client, guildId) {
-    const result = await client.db.query(
-        `SELECT * FROM streaks WHERE guild_id = $1 AND streak_count > 0`,
-        [guildId]
-    );
-    return result.rows;
+    const index = await client.db.get(guildIndexKey(guildId)) || [];
+    const streaks = [];
+ 
+    for (const key of index) {
+        const s = await client.db.get(key);
+        if (s && s.streak_count > 0) streaks.push(s);
+    }
+ 
+    return streaks;
 }
  
-// Freeze management
+export async function getTopStreaks(client, guildId, limit = 10) {
+    const streaks = await getAllActiveStreaks(client, guildId);
+    return streaks.sort((a, b) => b.streak_count - a.streak_count).slice(0, limit);
+}
+ 
+// ── Index helpers ─────────────────────────────────────────────────────────────
+ 
+async function addToUserIndex(client, guildId, userId, key) {
+    const index = await client.db.get(userIndexKey(guildId, userId)) || [];
+    if (!index.includes(key)) {
+        index.push(key);
+        await client.db.set(userIndexKey(guildId, userId), index);
+    }
+}
+ 
+async function removeFromUserIndex(client, guildId, userId, key) {
+    const index = await client.db.get(userIndexKey(guildId, userId)) || [];
+    const updated = index.filter(k => k !== key);
+    await client.db.set(userIndexKey(guildId, userId), updated);
+}
+ 
+async function addToGuildIndex(client, guildId, key) {
+    const index = await client.db.get(guildIndexKey(guildId)) || [];
+    if (!index.includes(key)) {
+        index.push(key);
+        await client.db.set(guildIndexKey(guildId), index);
+    }
+}
+ 
+async function removeFromGuildIndex(client, guildId, key) {
+    const index = await client.db.get(guildIndexKey(guildId)) || [];
+    const updated = index.filter(k => k !== key);
+    await client.db.set(guildIndexKey(guildId), updated);
+}
+ 
+// ── Freeze management ─────────────────────────────────────────────────────────
+ 
 export async function getFreezesData(client, guildId, userId) {
+    const key = freezeKey(guildId, userId);
     const now = Date.now();
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
  
-    let result = await client.db.query(
-        `SELECT * FROM streak_freezes WHERE user_id = $1 AND guild_id = $2`,
-        [userId, guildId]
-    );
+    let data = await client.db.get(key);
  
-    if (!result.rows[0]) {
-        result = await client.db.query(
-            `INSERT INTO streak_freezes (user_id, guild_id, freezes_available, last_reset) VALUES ($1, $2, 3, $3) RETURNING *`,
-            [userId, guildId, now]
-        );
+    if (!data) {
+        data = { freezes_available: 3, last_reset: now };
+        await client.db.set(key, data);
+        return data;
     }
  
-    const data = result.rows[0];
- 
-    // Reset freezes if it's a new month
+    // Reset if new month
     if (data.last_reset < startOfMonth.getTime()) {
-        result = await client.db.query(
-            `UPDATE streak_freezes SET freezes_available = 3, last_reset = $1 WHERE user_id = $2 AND guild_id = $3 RETURNING *`,
-            [now, userId, guildId]
-        );
-        return result.rows[0];
+        data.freezes_available = 3;
+        data.last_reset = now;
+        await client.db.set(key, data);
     }
  
     return data;
@@ -186,58 +204,28 @@ export async function useFreeze(client, guildId, userId) {
     const data = await getFreezesData(client, guildId, userId);
     if (data.freezes_available <= 0) return false;
  
-    await client.db.query(
-        `UPDATE streak_freezes SET freezes_available = freezes_available - 1 WHERE user_id = $1 AND guild_id = $2`,
-        [userId, guildId]
-    );
+    data.freezes_available -= 1;
+    await client.db.set(freezeKey(guildId, userId), data);
     return true;
 }
  
 export async function addFreezeBonus(client, guildId, userId, amount) {
-    await client.db.query(
-        `UPDATE streak_freezes SET freezes_available = freezes_available + $1 WHERE user_id = $2 AND guild_id = $3`,
-        [amount, userId, guildId]
-    );
+    const data = await getFreezesData(client, guildId, userId);
+    data.freezes_available += amount;
+    await client.db.set(freezeKey(guildId, userId), data);
 }
  
-// Interaction cooldown check (15 seconds)
+// ── Interaction cooldown (15 seconds) ────────────────────────────────────────
+ 
 export async function checkInteractionCooldown(client, guildId, userId, targetId) {
-    const [u1, u2] = [userId, targetId].sort();
-    const fifteenSecondsAgo = Date.now() - 15000;
-    const result = await client.db.query(
-        `SELECT * FROM streak_interactions WHERE guild_id = $1 AND ((user_id = $2 AND target_id = $3) OR (user_id = $3 AND target_id = $2)) AND timestamp > $4 ORDER BY timestamp DESC LIMIT 1`,
-        [guildId, u1, u2, fifteenSecondsAgo]
-    );
-    return result.rows.length === 0; // true = can interact
+    const key = cooldownKey(guildId, userId, targetId);
+    const last = await client.db.get(key);
+    if (!last) return true;
+    return Date.now() - last > 15000;
 }
  
 export async function recordInteraction(client, guildId, userId, targetId) {
-    await client.db.query(
-        `INSERT INTO streak_interactions (guild_id, user_id, target_id, timestamp) VALUES ($1, $2, $3, $4)`,
-        [guildId, userId, targetId, Date.now()]
-    );
- 
-    // Clean up old interactions older than 24h
-    await client.db.query(
-        `DELETE FROM streak_interactions WHERE timestamp < $1`,
-        [Date.now() - 86400000]
-    );
+    const key = cooldownKey(guildId, userId, targetId);
+    await client.db.set(key, Date.now());
 }
  
-// Set freeze pending on a broken streak (for the button)
-export async function setFreezePending(client, guildId, userId1, userId2) {
-    const [u1, u2] = [userId1, userId2].sort();
-    const until = Date.now() + 86400000; // 24 hours
-    await client.db.query(
-        `UPDATE streaks SET freeze_pending = TRUE, freeze_pending_until = $1 WHERE guild_id = $2 AND user1_id = $3 AND user2_id = $4`,
-        [until, guildId, u1, u2]
-    );
-}
- 
-export async function clearFreezePending(client, guildId, userId1, userId2) {
-    const [u1, u2] = [userId1, userId2].sort();
-    await client.db.query(
-        `UPDATE streaks SET freeze_pending = FALSE, freeze_pending_until = NULL WHERE guild_id = $1 AND user1_id = $2 AND user2_id = $3`,
-        [guildId, u1, u2]
-    );
-}
