@@ -9,7 +9,9 @@ import { InteractionHelper } from '../utils/interactionHelper.js';
 import { createInteractionTraceContext, runWithTraceContext } from '../utils/traceContext.js';
 import { validateChatInputPayloadOrThrow } from '../utils/commandInputValidation.js';
 import { enforceAbuseProtection, formatCooldownDuration } from '../utils/abuseProtection.js';
-
+import { handleFreezeButton } from '../services/streakScheduler.js';
+import { handleBreakStreakButton } from '../commands/Community/breakstreak.js';
+ 
 function withTraceContext(context = {}, traceContext = {}) {
   return {
     traceId: traceContext.traceId,
@@ -19,18 +21,18 @@ function withTraceContext(context = {}, traceContext = {}) {
     ...context
   };
 }
-
+ 
 export default {
   name: Events.InteractionCreate,
   async execute(interaction, client) {
     const interactionTraceContext = createInteractionTraceContext(interaction);
     interaction.traceContext = interactionTraceContext;
     interaction.traceId = interactionTraceContext.traceId;
-
+ 
     return runWithTraceContext(interactionTraceContext, async () => {
       try {
         InteractionHelper.patchInteractionResponses(interaction);
-
+ 
         if (interaction.isChatInputCommand()) {
           try {
             logger.info(`Command executed: /${interaction.commandName} by ${interaction.user.tag}`, {
@@ -40,14 +42,14 @@ export default {
               userId: interaction.user?.id,
               command: interaction.commandName
             });
-
+ 
             validateChatInputPayloadOrThrow(interaction, withTraceContext({
               type: 'command_input_validation',
               commandName: interaction.commandName
             }, interactionTraceContext));
-
+ 
             const command = client.commands.get(interaction.commandName);
-
+ 
             if (!command) {
               throw createError(
                 `No command matching ${interaction.commandName} was found.`,
@@ -56,7 +58,7 @@ export default {
                 withTraceContext({ commandName: interaction.commandName }, interactionTraceContext)
               );
             }
-
+ 
             const abuseProtection = await enforceAbuseProtection(interaction, command, interaction.commandName);
             if (!abuseProtection.allowed) {
               const formattedCooldown = formatCooldownDuration(abuseProtection.remainingMs);
@@ -74,7 +76,7 @@ export default {
                 }, interactionTraceContext)
               );
             }
-
+ 
             let guildConfig = null;
             if (interaction.guild) {
               guildConfig = await getGuildConfig(client, interaction.guild.id, interactionTraceContext);
@@ -87,7 +89,7 @@ export default {
                 );
               }
             }
-
+ 
             await command.execute(interaction, guildConfig, client);
           } catch (error) {
             await handleInteractionError(interaction, error, withTraceContext({
@@ -96,7 +98,6 @@ export default {
             }, interactionTraceContext));
           }
         } else if (interaction.isAutocomplete()) {
-          // Handle autocomplete interactions
           const focusedOption = interaction.options.getFocused(true);
           
           if (interaction.commandName === 'apply' && focusedOption.name === 'application') {
@@ -105,7 +106,6 @@ export default {
               const roles = await getApplicationRoles(client, interaction.guildId);
               const roleName = interaction.options.getString('application', false);
               
-              // Filter: only show enabled applications
               const filtered = roles.filter(role =>
                 role.enabled !== false && 
                 role.name.toLowerCase().startsWith(roleName?.toLowerCase() || '')
@@ -131,7 +131,6 @@ export default {
               const roles = await getApplicationRoles(client, interaction.guildId);
               const appName = interaction.options.getString('application', false);
               
-              // Show all applications (enabled and disabled), but mark disabled ones
               const filtered = roles.filter(role =>
                 role.name.toLowerCase().startsWith(appName?.toLowerCase() || '')
               );
@@ -163,12 +162,9 @@ export default {
                 return;
               }
               
-              // Filter out panels whose messages no longer exist
               const validPanels = [];
               for (const panel of panels) {
-                if (!panel.messageId || !panel.channelId) {
-                  continue;
-                }
+                if (!panel.messageId || !panel.channelId) continue;
                 
                 const channel = guild.channels.cache.get(panel.channelId);
                 if (!channel) {
@@ -223,12 +219,35 @@ export default {
             }
           }
         } else if (interaction.isButton()) {
+ 
+          // ── Streak button handlers ─────────────────────────────────────
+          if (interaction.customId.startsWith('freeze_streak_')) {
+            try {
+              return await handleFreezeButton(interaction, client);
+            } catch (error) {
+              return handleInteractionError(interaction, error, withTraceContext({
+                type: 'button', customId: interaction.customId, handler: 'freeze_streak'
+              }, interactionTraceContext));
+            }
+          }
+ 
+          if (interaction.customId.startsWith('breakstreak_')) {
+            try {
+              return await handleBreakStreakButton(interaction, client);
+            } catch (error) {
+              return handleInteractionError(interaction, error, withTraceContext({
+                type: 'button', customId: interaction.customId, handler: 'breakstreak'
+              }, interactionTraceContext));
+            }
+          }
+          // ───────────────────────────────────────────────────────────────
+ 
           if (interaction.customId.startsWith('shared_todo_')) {
             const parts = interaction.customId.split('_');
             const buttonType = parts.slice(0, 3).join('_');
             const listId = parts[3];
             const button = client.buttons.get(buttonType);
-
+ 
             if (button) {
               try {
                 await button.execute(interaction, client, [listId]);
@@ -249,15 +268,15 @@ export default {
             }
             return;
           }
-
+ 
           const [customId, ...args] = interaction.customId.split(':');
           const button = client.buttons.get(customId);
-
+ 
           if (!button) {
             if (!interaction.customId.includes(':')) {
               return;
             }
-
+ 
             throw createError(
               `No button handler found for ${customId}`,
               ErrorTypes.CONFIGURATION,
@@ -265,7 +284,7 @@ export default {
               withTraceContext({ customId }, interactionTraceContext)
             );
           }
-
+ 
           try {
             await button.execute(interaction, client, args);
           } catch (error) {
@@ -278,15 +297,12 @@ export default {
         } else if (interaction.isStringSelectMenu()) {
           const [customId, ...args] = interaction.customId.split(':');
           const selectMenu = client.selectMenus.get(customId);
-
+ 
           if (!selectMenu) {
             if (!interaction.customId.includes(':')) {
-              // No registered handler and no ':' delimiter — this is an inline-collected
-              // select menu (e.g. ticket_config_<guildId>, jointocreate_config_<id>).
-              // Return silently so the existing MessageComponentCollector handles it.
               return;
             }
-
+ 
             throw createError(
               `No select menu handler found for ${customId}`,
               ErrorTypes.CONFIGURATION,
@@ -294,7 +310,7 @@ export default {
               withTraceContext({ customId }, interactionTraceContext)
             );
           }
-
+ 
           try {
             await selectMenu.execute(interaction, client, args);
           } catch (error) {
@@ -316,7 +332,7 @@ export default {
             }
             return;
           }
-
+ 
           if (interaction.customId.startsWith('app_review_')) {
             try {
               await handleApplicationReviewModal(interaction);
@@ -329,7 +345,7 @@ export default {
             }
             return;
           }
-
+ 
           if (interaction.customId.startsWith('jtc_')) {
             logger.debug(`Skipping modal handler lookup for inline-awaited modal: ${interaction.customId}`, {
               event: 'interaction.modal.inline_skipped',
@@ -337,17 +353,15 @@ export default {
             });
             return;
           }
-
+ 
           const [customId, ...args] = interaction.customId.split(':');
           const modal = client.modals.get(customId);
-
+ 
           if (!modal) {
             if (!interaction.customId.includes(':')) {
-              // No registered handler and no ':' delimiter — this is an inline-awaited
-              // modal (e.g. via awaitModalSubmit). Return silently so the caller handles it.
               return;
             }
-
+ 
             throw createError(
               `No modal handler found for ${customId}`,
               ErrorTypes.CONFIGURATION,
@@ -355,7 +369,7 @@ export default {
               withTraceContext({ customId }, interactionTraceContext)
             );
           }
-
+ 
           try {
             await modal.execute(interaction, client, args);
           } catch (error) {
@@ -376,7 +390,7 @@ export default {
           guildId: interaction.guildId,
           userId: interaction.user?.id
         });
-
+ 
         try {
           const ephemeralErrorMessage = {
             embeds: [MessageTemplates.ERRORS.DATABASE_ERROR('processing your interaction')],
@@ -385,7 +399,7 @@ export default {
           const editErrorMessage = {
             embeds: [MessageTemplates.ERRORS.DATABASE_ERROR('processing your interaction')]
           };
-
+ 
           if (interaction.deferred) {
             await interaction.editReply(editErrorMessage);
           } else if (interaction.replied) {
