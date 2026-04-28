@@ -19,8 +19,9 @@ export default {
             const streaks = await getUserStreaks(client, guildId, userId);
  
             if (streaks.length === 0) {
+                const chatChannel = interaction.guild.channels.cache.find(c => c.name === '✨・chat-general');
                 return InteractionHelper.universalReply(interaction, {
-                    content: "🔥 You have no active streaks yet! Start one by replying to or mentioning someone in <#" + interaction.guild.channels.cache.find(c => c.name === '✨・chat-general')?.id + ">.",
+                    content: `🔥 You have no active streaks yet! Start one by replying to or mentioning someone in ${chatChannel ? chatChannel.toString() : '#✨・chat-general'}.`,
                     ephemeral: true,
                 });
             }
@@ -28,7 +29,7 @@ export default {
             const lines = await Promise.all(streaks.map(async (s, i) => {
                 const otherId = s.user1_id === userId ? s.user2_id : s.user1_id;
                 const other = await interaction.guild.members.fetch(otherId).catch(() => null);
-                const name = other ? other.displayName : `Unknown (${otherId})`;
+                const name = other ? other.displayName : `Unknown`;
                 return `**${i + 1}.** 🔥 **${s.streak_count}** days with **${name}** (Best: ${s.highest_streak})`;
             }));
  
