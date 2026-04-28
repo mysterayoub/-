@@ -5,7 +5,6 @@ import { InteractionHelper } from '../../utils/interactionHelper.js';
 import { handleInteractionError } from '../../utils/errorHandler.js';
 import { getStreak, deleteStreak } from '../../services/streakService.js';
  
-// Track pending break requests in memory: "guildId_u1_u2" -> { requesterId, accepted: Set }
 const pendingBreaks = new Map();
  
 export default {
@@ -42,15 +41,13 @@ export default {
             const [u1, u2] = [userId, target.id].sort();
             const key = `${guildId}_${u1}_${u2}`;
  
-            // Create pending break request
             pendingBreaks.set(key, {
                 requesterId: userId,
                 targetId: target.id,
-                accepted: new Set([userId]), // requester auto-accepts
+                accepted: new Set([userId]),
                 streakCount: streak.streak_count,
             });
  
-            // Auto-expire after 10 minutes
             setTimeout(() => pendingBreaks.delete(key), 600000);
  
             const acceptBtn = new ButtonBuilder()
@@ -82,10 +79,8 @@ export default {
     },
 };
  
-// Handle break streak button interactions
 export async function handleBreakStreakButton(interaction, client) {
     const parts = interaction.customId.split('_');
-    // breakstreak_accept_u1_u2 or breakstreak_cancel_u1_u2
     const action = parts[1];
     const u1 = parts[2];
     const u2 = parts[3];
@@ -99,18 +94,15 @@ export async function handleBreakStreakButton(interaction, client) {
         return interaction.reply({ content: '❌ This request has expired.', ephemeral: true });
     }
  
-    // Only the two users can interact
     if (clickerId !== u1 && clickerId !== u2) {
         return interaction.reply({ content: '❌ Only the two users in this streak can respond.', ephemeral: true });
     }
  
     if (action === 'cancel') {
         pendingBreaks.delete(key);
- 
         const disabledRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('bs_done').setLabel('Cancelled').setStyle(ButtonStyle.Secondary).setDisabled(true)
         );
- 
         return interaction.update({
             content: `❌ <@${clickerId}> cancelled the streak break request.`,
             embeds: [],
@@ -122,7 +114,6 @@ export async function handleBreakStreakButton(interaction, client) {
         pending.accepted.add(clickerId);
  
         if (pending.accepted.size >= 2) {
-            // Both accepted — delete the streak permanently
             await deleteStreak(client, guildId, u1, u2);
             pendingBreaks.delete(key);
  
@@ -138,7 +129,6 @@ export async function handleBreakStreakButton(interaction, client) {
                 components: [disabledRow],
             });
         } else {
-            // Only one accepted so far
             const otherId = clickerId === u1 ? u2 : u1;
             return interaction.reply({
                 content: `✅ You accepted. Waiting for <@${otherId}> to also accept...`,
