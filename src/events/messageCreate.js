@@ -69,13 +69,16 @@ async function handleTikTok(message) {
             const { videoBuffer } = await getTikTokVideo(matches[0]);
             const attachment = new AttachmentBuilder(videoBuffer, { name: 'tiktok.mp4' });
  
+            // Delete the original message
             await message.delete().catch(() => {});
  
+            // Create a fresh webhook
             const webhook = await message.channel.createWebhook({
                 name: message.member?.displayName || message.author.username,
                 reason: 'TikTok video downloader',
             });
  
+            // Send as the user
             await webhook.send({
                 username: message.member?.displayName || message.author.username,
                 avatarURL: message.author.displayAvatarURL({ dynamic: true }),
@@ -83,6 +86,7 @@ async function handleTikTok(message) {
                 files: [attachment],
             });
  
+            // Delete the webhook immediately after sending
             await webhook.delete('TikTok webhook cleanup').catch(() => {});
  
         } catch (err) {
@@ -101,155 +105,62 @@ async function handleTikTok(message) {
  
 // ── Automod ──────────────────────────────────────────────────────────────────
  
-// Normalise: removes invisible chars, zero-width chars, and then replaces
-// ALL non-alphanumeric characters with a wildcard placeholder so that
-// n%gg%r, n@gg@r, n~gg~r, c;ck, f#gg~t etc. all get caught.
 function normalise(str) {
     return str
         .toLowerCase()
-        // Remove invisible/zero-width characters
-        .replace(/[\u200B-\u200D\uFEFF\u00AD\u034F\u2060\u180E\u00A0]/g, '')
-        // Remove spaces (people space letters out to bypass)
-        .replace(/\s+/g, '')
-        // Map every special character / symbol to a consistent placeholder "x"
-        // so n%gg%r becomes nxggxr and still matches our patterns
-        .replace(/[^a-z0-9]/g, 'x');
+        .replace(/[\u200B-\u200D\uFEFF\u00AD\u034F\u2060\u180E]/g, '')
+        .replace(/[\s\-_.*,|\\\/'"`;:~^]+/g, '')
+        .replace(/[^a-z0-9]/g, c => c);
 }
  
-// ── N-word patterns ──────────────────────────────────────────────────────────
-// After normalise, leet digits and symbols all become 'x' or stay as digits.
-// We match both the digit variants AND 'x' as a wildcard.
-const NWORD_PATTERNS = [
-    // nigger, n1gg3r, n!gg@r, n%gg%r, nxggxr, nigg3r etc.
-    /n[ix1][gx9][gx9][ex3][rx]/,
-    /n[ix1][gx9][gx9][ex3]r/,
-    /n[ix1][gx9][gx9]x/,
-    // nger, ngr, ng3r (missing the i)
-    /n[gx9][gx9]?[ex3]r/,
-    /n[gx9][gx9]?[rx]/,
-    // nigg alone
-    /n[ix1][gx9][gx9]/,
-    // n-word written out
-    /nxword/,
-    // spaced: n i g g e r (spaces removed by normalise so becomes nigger)
-    // already caught above after normalise strips spaces
-    // niggar, niggur variants
-    /n[ix1][gx9][gx9][aeiouux]/,
-    // hard r after nigga: "nigga r" -> after normalise space removed -> "niggar"
-    /nigg[ax4][rx]/,
+const BLOCKED_PATTERNS = [
+    /n[i!1|ï¡ì í î ïɪ]+[g9q6][g9q6][e3€3ëèéê]+[r|]/,
+    /n[g9][g9]?[e3€]+[r|]/,
+    /n[g9][g9]?[r|]/,
+    /n[i!1|ï]+[g9q6][g9q6]/,
+    /n[\-–—]+w[o0]rd/,
+    /n[\*#@!?]{1,4}[e3]?[r|]?/,
+    /n\s+[i!1]\s+[g9]\s+[g9]\s+[e3]\s+[r|]/,
+    /nigg[a@4][^\w]?[r|]/,
 ];
  
-function isNword(content) {
+function isBlocked(content) {
     const norm = normalise(content);
-    // Whitelist: remove "nigga" and "niggas" before checking
     const withoutAllowed = norm.replace(/nigga[sz]?/g, '');
-    return NWORD_PATTERNS.some(p => p.test(withoutAllowed));
-}
- 
-// ── Faggot patterns ──────────────────────────────────────────────────────────
-// f@gg@t, f#gg#t, f~gg~t, f4gg0t, fxggxt etc.
-const FAGGOT_PATTERNS = [
-    // faggot and all symbol/leet variants
-    /f[ax4x][gx9][gx9][ox0][tx7]/,
-    /f[ax4x][gx9][gx9][ox0]/,
-    /f[ax4x][gx9][gx9]/,
-    // fagget, faggit
-    /f[ax4x][gx9][gx9][eix][tx7]/,
-    // fgt (shortened)
-    /f[gx9][tx7]/,
-    // fag alone
-    /f[ax4x][gx9]/,
-];
- 
-function isFaggot(content) {
-    const norm = normalise(content);
-    return FAGGOT_PATTERNS.some(p => p.test(norm));
-}
- 
-// ── Cunt patterns ────────────────────────────────────────────────────────────
-// c*nt, c;nt, cxnt, c0nt, cvnt etc.
-const CUNT_PATTERNS = [
-    // cunt and all symbol/leet variants — after normalise * ; ~ become x
-    /[ckx][ux0vx][nx][tx7]/,
-    // cunts, cuntz
-    /[ckx][ux0vx][nx][tx7][sz]/,
-    // cvnt, c0nt
-    /[ck][vx0][nx][tx7]/,
-];
- 
-function isCunt(content) {
-    const norm = normalise(content);
-    return CUNT_PATTERNS.some(p => p.test(norm));
-}
- 
-// ── Cuck patterns ────────────────────────────────────────────────────────────
-// c;ck, cxck, c*ck, cuck, kuck etc.
-const CUCK_PATTERNS = [
-    // cuck and all symbol/leet variants
-    /[ckx][ux0vx][ckx]/,
-    // cucked, cucking
-    /[ckx][ux0vx][ckx][exix]?[dgx]/,
-];
- 
-function isCuck(content) {
-    const norm = normalise(content);
-    return CUCK_PATTERNS.some(p => p.test(norm));
-}
- 
-// ── Trigger automod ──────────────────────────────────────────────────────────
- 
-async function triggerAutomod(message, originalContent) {
-    await message.delete().catch(() => {});
- 
-    const staffChannel = message.guild.channels.cache.find(c => c.name === '✨・staff-chat');
-    if (!staffChannel) {
-        logger.warn('Automod: Could not find ✨・staff-chat channel');
-        return;
-    }
- 
-    const staffRole = message.guild.roles.cache.find(r => r.name === 'Staff');
-    const staffMention = staffRole ? staffRole.toString() : '@Staff';
- 
-    await staffChannel.send(
-        `${staffMention}\n` +
-        `⚠️ **Automod triggered** in ${message.channel.toString()}\n\n` +
-        `**User:** ${message.author.tag} (${message.author.toString()} | ID: \`${message.author.id}\`)\n` +
-        `**Message:** \`${originalContent}\`\n` +
-        `**Channel:** ${message.channel.toString()} (\`${message.channel.id}\`)\n` +
-        `**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
-    );
- 
-    logger.info(`Automod: Deleted message from ${message.author.tag} in ${message.guild.name}`);
+    return BLOCKED_PATTERNS.some(p => p.test(withoutAllowed));
 }
  
 async function handleAutomod(message) {
     try {
         if (!message.content) return false;
  
-        const memberRoles = message.member.roles.cache;
-        const guild = message.guild;
+        const bypassRole = message.guild.roles.cache.find(r => r.name === 'Automod bypass');
+        if (bypassRole && message.member.roles.cache.has(bypassRole.id)) return false;
  
-        const automodBypassRole = guild.roles.cache.find(r => r.name === 'Automod bypass');
-        const hasAutomodBypass = automodBypassRole && memberRoles.has(automodBypassRole.id);
+        if (!isBlocked(message.content)) return false;
  
-        const pinkyRole = guild.roles.cache.find(r => r.name === '[ 🌸 ] Pinky Mysters');
-        const hasPinkyBypass = pinkyRole && memberRoles.has(pinkyRole.id);
+        await message.delete().catch(() => {});
  
-        // N-word: only "Automod bypass" can bypass
-        if (!hasAutomodBypass && isNword(message.content)) {
-            await triggerAutomod(message, message.content);
+        const staffChannel = message.guild.channels.cache.find(c => c.name === '✨・staff-chat');
+        if (!staffChannel) {
+            logger.warn('Automod: Could not find ✨・staff-chat channel');
             return true;
         }
  
-        // Faggot, cunt, cuck: both roles can bypass
-        if (!hasAutomodBypass && !hasPinkyBypass) {
-            if (isFaggot(message.content) || isCunt(message.content) || isCuck(message.content)) {
-                await triggerAutomod(message, message.content);
-                return true;
-            }
-        }
+        const staffRole = message.guild.roles.cache.find(r => r.name === 'Staff');
+        const staffMention = staffRole ? staffRole.toString() : '@Staff';
  
-        return false;
+        await staffChannel.send(
+            `${staffMention}\n` +
+            `⚠️ **Automod triggered** in ${message.channel.toString()}\n\n` +
+            `**User:** ${message.author.tag} (${message.author.toString()} | ID: \`${message.author.id}\`)\n` +
+            `**Message:** \`${message.content}\`\n` +
+            `**Channel:** ${message.channel.toString()} (\`${message.channel.id}\`)\n` +
+            `**Time:** <t:${Math.floor(Date.now() / 1000)}:F>`
+        );
+ 
+        logger.info(`Automod: Deleted message from ${message.author.tag} in ${message.guild.name}`);
+        return true;
     } catch (error) {
         logger.error('Error in automod handler:', error);
         return false;
@@ -325,3 +236,4 @@ async function handleLeveling(message, client) {
         logger.error('Error handling leveling for message:', error);
     }
 }
+ 
