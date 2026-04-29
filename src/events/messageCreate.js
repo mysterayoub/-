@@ -104,9 +104,15 @@ async function handleTikTok(message) {
  
 function stripNonText(str) {
     return str
+        // Remove all URLs
         .replace(/https?:\/\/[^\s]+/gi, '')
+        // Remove Discord custom emojis: <:name:123> and <a:name:123>
         .replace(/<a?:[a-zA-Z0-9_]+:\d+>/g, '')
+        // Remove Discord mentions: <@123>, <@!123>, <#123>, <@&123>
         .replace(/<[@#][!&]?\d+>/g, '')
+        // Remove all Unicode emojis (covers all emoji ranges)
+        .replace(/\p{Emoji}/gu, '')
+        // Remove markdown
         .replace(/[*_~`|]/g, '')
         .trim();
 }
