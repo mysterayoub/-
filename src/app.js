@@ -13,6 +13,7 @@ import { checkBirthdays } from './services/birthdayService.js';
 import { checkGiveaways } from './services/giveawayService.js';
 import { loadCommands, registerCommands as registerSlashCommands } from './handlers/commandLoader.js';
 import { startStreakScheduler } from './services/streakScheduler.js';
+import { startDailyPingScheduler } from './services/dailyPingService.js';
  
 class TitanBot extends Client {
   constructor() {
@@ -85,6 +86,10 @@ class TitanBot extends Client {
       // Start streak scheduler (midnight NL + 22:00 warning)
       startStreakScheduler(this);
       startupLog('✅ Streak scheduler started');
+ 
+      // Start daily ping scheduler (13:00 NL)
+      startDailyPingScheduler(this);
+      startupLog('✅ Daily ping scheduler started');
       
       const databaseMode = dbStatus.isDegraded
         ? 'Optional in-memory mode (data resets after restart)'
@@ -326,6 +331,3 @@ try {
 }
  
 export default TitanBot;
-
-
-
